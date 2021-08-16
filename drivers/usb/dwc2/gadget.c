@@ -33,6 +33,8 @@
 #include "core.h"
 #include "hw.h"
 
+static int dwc2_gadget_exit_usb_suspend(struct dwc2_hsotg *hsotg);
+
 /* conversion functions */
 static inline struct dwc2_hsotg_req *our_req(struct usb_request *req)
 {
@@ -1390,6 +1392,7 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
 	if (hs->lx_state != DWC2_L0) {
 		dev_dbg(hs->dev, "%s: submit request only in active state\n",
 			__func__);
+		dwc2_gadget_exit_usb_suspend(hs);
 		return -EAGAIN;
 	}
 
@@ -5243,6 +5246,52 @@ int dwc2_gadget_enter_hibernation(struct dwc2_hsotg *hsotg)
 	dev_dbg(hsotg->dev, "Hibernation completed\n");
 
 	return ret;
+}
+
+static int dwc2_gadget_exit_usb_suspend(struct dwc2_hsotg *hsotg) {
+	u32 gpwrdn;
+	u32 dctl;
+	int ret = 0;
+	struct dwc2_gregs_backup *gr;
+	struct dwc2_dregs_backup *dr;
+
+	gr = &hsotg->gr_backup;
+	dr = &hsotg->dr_backup;
+
+	/* De-assert Restore */
+	gpwrdn = dwc2_readl(hsotg, GPWRDN);
+	gpwrdn &= ~GPWRDN_RESTORE;
+	dwc2_writel(hsotg, gpwrdn, GPWRDN);
+	udelay(10);
+
+	/* Restore GUSBCFG, DCFG and DCTL */
+	dwc2_writel(hsotg, gr->gusbcfg, GUSBCFG);
+	dwc2_writel(hsotg, dr->dcfg, DCFG);
+	dwc2_writel(hsotg, dr->dctl, DCTL);
+
+	/* De-assert Wakeup Logic */
+	gpwrdn = dwc2_readl(hsotg, GPWRDN);
+	gpwrdn &= ~GPWRDN_PMUACTV;
+	dwc2_writel(hsotg, gpwrdn, GPWRDN);
+
+	udelay(10);
+	/* Start Remote Wakeup Signaling */
+	dwc2_writel(hsotg, dr->dctl | DCTL_RMTWKUPSIG, DCTL);
+
+	/* Wait for interrupts which must be cleared */
+	mdelay(2);
+	/* Clear all pending interupts */
+	dwc2_writel(hsotg, 0xffffffff, GINTSTS);
+
+	mdelay(10);
+	dctl = dwc2_readl(hsotg, DCTL);
+	dctl &= ~DCTL_RMTWKUPSIG;
+	dwc2_writel(hsotg, dctl, DCTL);
+
+	hsotg->lx_state = DWC2_L0;
+
+	return ret;
+
 }
 
 /**
